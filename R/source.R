@@ -1,0 +1,6 @@
+library(here)
+scripts <- here("R", c("pathways.R", "packages.R", "functions.R"))
+lapply(scripts, source)
+Sys.setenv("_R_CHECK_LENGTH_1_CONDITION_" = "true")
+options(warnPartialMatchArgs = TRUE)
+currentDate <- Sys.Date()

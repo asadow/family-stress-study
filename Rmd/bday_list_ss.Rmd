@@ -1,0 +1,332 @@
+---
+title: "bday_list_ss"
+author: "Adam"
+date: "02/06/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preparation {.tabset}
+
+## Read 
+```{r}
+
+ls_paths <- list.files(
+  path = ss_p,
+  pattern = "*.csv", 
+  full.names = T
+  ) 
+    
+ls_df <- data.frame(
+  path_name = ls_paths
+  ) %>% 
+  path_to_names()
+
+ls_df <- ls_df %>%
+  filter(type_sv == "_reg")
+
+dfn <- ls_df %>% 
+  mutate(
+    data = map(
+      path_name, 
+        ~ fread(
+            .,
+            skip = 1
+            )
+          )
+       )
+
+df <- dfn %>% unnest(data)
+```
+
+## Parent Columns
+
+### FID Filter
+```{r}
+df <- df %>% 
+  mutate(
+    start.date = !!sym("Start Date"),
+    first.name = !!sym("Caregiver #1 Information - First name"),
+    last.name = !!sym("Caregiver #1 Information - Last name"),
+    email = !!sym("Caregiver #1 Email"),
+    email = str_to_title(email),
+    name = str_to_title(
+      paste(first.name, 
+            last.name)
+      ),
+    street = !!sym("Caregiver #1 Information - Home street address"),
+    city = !!sym("Caregiver #1 Information - City/Town"),
+    postal_code = !!sym("Caregiver #1 Information - Postal code (ex: A1A 1A1)")
+  ) %>% 
+  filter(!FamilyID == "") # "Exclude those without FamilyID as they are ineligible" - Shannon
+```
+
+
+## Child Columns
+
+### Coalesce multiple columns for same variables
+```{r}
+
+cvars <- c(
+  "Name - First (N|n)ame", 
+  "Name - Last (N|n)ame", 
+  "(Born Early|Born Before 34 Weeks)", 
+  "Health Conditions", 
+  "(Steroid Use|Steroids)", 
+  "Medication(s|)", 
+  "Birthday - Month",
+  "Birthday - Year"
+)
+
+cvars_replace <- c(
+  "first_name", 
+  "last_name", 
+  "born_before_34_weeks", 
+  "health_conditions", 
+  "steroid_use", 
+  "medications", 
+  "birthday_month",
+  "birthday_year"
+)
+```
+
+
+```{r}
+# common_across_1to3_children
+ca13c <- c(  
+  "Caregiver #2", 
+  "Caregiver #2 Information - First Name",
+  "Caregiver #2 Information - Last Name",
+  "Caregiver #2 Information - Email Address",
+  "Caregiver #2 Information - Confirm Email Address"
+  )
+ca13c_replace <- c(
+  "caregiver_2", 
+  "caregiver_2_first_name",
+  "caregiver_2_last_name",
+  "caregiver_2_email",
+  "caregiver_2_email_confirm"
+  )
+
+```
+
+```{r}
+# replace "" with NA for coalesce
+df <- df %>% 
+  mutate(
+    across(
+      everything(),
+      ~na_if(.,"")
+    )
+  )
+
+```
+
+
+```{r}
+child_labels <- paste0("Child ", 1:3, " - ")
+
+c1vars <- paste0("(Children#1 - |One Child - )", cvars)
+c2vars <- paste0("Children#2 - ", cvars)
+c3vars <- paste0("Children#3 - ", cvars)
+
+cxvars <- list(c1vars, c2vars, c3vars)
+```
+
+
+#### Loops 
+```{r}
+for(i in seq(child_labels)){
+  c_lab <- child_labels[i]
+  cv <- cxvars[[i]]
+  
+  for(j in seq(cvars)){
+    df <- df %>% 
+        mutate( 
+          !!sym(
+            paste0(
+              c_lab, 
+              cvars_replace[j])
+            ) := coalesce(
+                   !!!select(., 
+                               matches(cv[j])
+                               )
+                           )
+            
+            
+        )
+    
+  }
+  
+}
+
+```
+
+
+```{r}
+for(j in seq(ca13c)){
+    df <- df %>% 
+        mutate( 
+            !!sym(
+              ca13c_replace[j]
+              )
+              := coalesce(
+                   !!!select(., 
+                               matches(
+                                 ca13c[j]
+                                 )
+                               )
+                           )
+            
+            
+        )
+    
+}
+
+```
+
+
+## Row per child
+
+```{r}
+prefixed_cvars <- grep("^Child \\d -", names(df), value = T)
+
+df <- df %>% 
+  pivot_longer(
+    cols = all_of(prefixed_cvars),
+    names_to = c("child", ".value"),
+    names_pattern = "(Child \\d - )(.*)",
+  )
+
+df %>% 
+  select(name, child, all_of(cvars_replace)) %>%
+  filter(!is.na(first_name) & child  %in% "Child 2 -")
+```
+## Duplicates
+
+```{r}
+
+df %>% 
+  group_by(
+    FamilyID, 
+    child
+  ) %>% 
+  count() %>% 
+  filter(n>1)
+```
+
+
+
+## Variables 
+
+```{r}
+# Title trim function
+tt <- function(x){
+  str_to_title(
+    trimws(
+      {{x}}
+      )
+    )
+}
+
+
+bday_list <- df %>% 
+  mutate(
+    unit = !!sym("Caregiver #1 Information - Unit/Apt. Number"),
+    
+    across(
+      c(
+        first_name,
+        last_name,
+        street,
+        unit,
+        city,
+      ),
+      ~tt(.)
+    ),
+
+    parent_name = name,
+    postal_code = toupper(trimws(postal_code)),
+    postal_code = gsub("(.{3})(.*)", "\\1 \\2", postal_code)
+    ) %>% 
+  select(
+    first_name,
+    last_name,
+    birthday_month,
+    birthday_year,
+    street,
+    unit,
+    city,
+    postal_code
+  ) %>%  # Remove cases missing birthday as they were not eligible
+  filter(
+    !is.na(first_name) 
+    & !grepl("Import", first_name) 
+    & !is.na(birthday_month)
+  )  
+ 
+```
+
+
+## Export
+
+```{r}
+write.csv(
+  bday_list,
+  paste0(opath, "Family-Stress-Study Birthday List.csv"),
+  row.names = F
+  )
+
+```
+
+# Birthday for AHHA review
+
+```{r}
+c <- df %>%  # Remove cases missing birthday as they were not eligible
+  filter(
+    !is.na(first_name) 
+    & !grepl("Import", first_name) 
+    & !is.na(birthday_month)
+  )  %>% 
+  select(
+    ChildID,
+    birthday_month,
+    birthday_year
+  ) %>% 
+  rename(
+    ID = ChildID
+  )
+
+p <- dfn %>% unnest(data)
+p <- p %>%  # Remove cases missing birthday as they were not eligible
+  filter(
+    !mi(Caregiver1ID) 
+    & !grepl("Import", Caregiver1ID) 
+  ) %>% 
+  rename(
+    birthday_month = `Caregiver #1 - Birthday - Month`,
+    birthday_year = `Caregiver #1 - Birthday - Year`,
+    ID = Caregiver1ID
+  ) %>% 
+  select(
+    ID,
+    starts_with("birth")
+  )
+
+cp <- bind_rows(c, p)
+
+write_csv(
+  cp,
+  paste0(cle_p, "ss_id_bday.csv")
+  )
+
+
+p %>% 
+  select(
+    matches("\\dID|Family")
+  )
+names(p)
+``` 

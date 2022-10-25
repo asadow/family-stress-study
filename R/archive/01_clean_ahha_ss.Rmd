@@ -1,0 +1,317 @@
+---
+title: "ss_ahha"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+  pdf_document: 
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 5
+    number_sections: true
+    highlight: tango
+    fig_width: 12
+    fig_height: 12
+header-includes:
+   \usepackage{float}
+    \floatplacement{figure}{H}
+    \usepackage{longtable}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, 
+                      message= F, 
+                      warning = F, 
+                      comment=NA, 
+                      results = "hide", 
+                      tidy.opts=list(width.cutoff=60), 
+                      tidy=TRUE)
+
+```
+
+# Read
+```{r}
+ls_paths <- list.files(
+  path = ss_p,
+  pattern = "*.csv", 
+  full.names = T
+  ) 
+    
+ls_df <- data.frame(
+  path_name = ls_paths
+  ) %>% 
+  path_to_names()
+
+ls_df <- ls_df %>%
+  filter(str_detect(type_sv, "ahha"))
+
+dfn <- ls_df %>% 
+  mutate(
+    data = map(
+      path_name, 
+        ~ fread(
+            .,
+            skip = 1
+            )
+          )
+       )
+
+```
+
+# Remove duplicates
+
+```{r}
+df <- dfn %>% 
+  unnest(data)
+
+df <- df %>% 
+  mutate(
+    first_name = title_trim("Recipient First Name"),
+    last_name = title_trim("Recipient Last Name"),
+    email = title_trim("Recipient Email"),
+    start_date = "Start Date",
+    Progress = as.numeric(
+        as.character(Progress)
+      ),
+    name = glue("{first_name} {last_name}")
+    ) %>%
+    unite_names %>%
+    add_count(name, parent_sv) %>% 
+    filter(
+      !str_detect(name, "Import") 
+      | (n > 1 & Finished == "False")
+      ) %>% 
+    group_by(name, parent_sv) %>%
+    filter(
+      Progress == max(Progress)
+      & start_date == max(start_date)
+    ) %>% 
+  ungroup() 
+
+ duplicates <- df %>% 
+   add_count(name, parent_sv, Finished) %>% 
+   filter(n > 1) %>% 
+   select("Response ID", name, parent_sv, Finished, Progress, start_date) %>% 
+   arrange(name)
+ 
+ write.csv(
+   duplicates,
+   paste0(opath, "duplicates_ss_ahha.csv")
+   )
+```
+
+
+# Make child the primary ID
+```{r}
+
+df <- df %>% 
+  rename_with(
+    ~ str_replace(.x, "^Child( - | )", ""),
+    starts_with("Child")
+  )
+
+
+```
+
+
+```{r}
+
+df <- df %>% 
+  rename(
+    progress = Progress,
+    date = !!sym("Recorded Date"),
+    pregnant = Pregnancy,
+    bf = Breastfeeding,
+    comments = !!sym("Additional comments"),
+    ht_choice = !!sym("Height - Selected Choice"),
+    ht_cm = !!sym("Height - Height (to nearest 0.1 cm, e.g., 54.2) - Text"),
+    bm_choice = !!sym("Weight - Selected Choice"),
+    bm_kg = !!sym("Weight - Weight in kg (2 decimals, e.g., 32.24) - Text"),
+    ht_bm_notes = !!sym("Height and Weight Notes"),
+    wc_choice = !!sym("Waist Circumference - Selected Choice"),
+    wc_cm = !!sym("Waist Circumference - Waist circumference (to nearest 0.1 cm, e.g., 23.5) - Text"),
+    wc_notes = !!sym("Waist Circumference Notes")
+  )
+
+df <- df %>% 
+  rename_with(
+    ~ tolower(
+        str_replace_all(
+          str_replace_all(.x, " - ", " "),
+          " ", 
+          "_"
+        )
+      ),
+    matches("Hair")  
+  )
+
+```
+
+
+# Clean
+
+## Equate Caregiver names
+```{r}
+
+df <- df %>% 
+  rename_with(
+    ~ str_replace(.x, "P1", "Caregiver #1"),
+    starts_with("P1")
+  )
+
+df <- df %>% 
+  rename(
+    "Caregiver #1 Height - metric - cm" = "Caregiver #1 height -metric - cm"
+  ) %>%
+  rename_with(
+    ~ str_replace(
+      .x, 
+      "height imperial", 
+      "Height - imperial"
+      ),
+    starts_with("Caregiver #1")
+  ) %>%
+  rename_with(
+    ~ str_replace(
+      .x, 
+      "- Height Reporting Preference", 
+      "Height - reporting preference"
+      ),
+    starts_with("Caregiver #1")
+  )
+```
+
+## Coalesce Caregiver 1 and 2 columns into simply Caregiver
+
+```{r}
+cg1 <- str_subset(names(df), "Caregiver #1")
+cg2 <- str_subset(names(df), "^(?!.*(Name|Email))Caregiver #2")
+cg <- str_replace(cg1, "Caregiver #1 ", "")
+
+```
+
+
+```{r}
+df <- df %>% 
+  mutate(
+    across(
+      starts_with("Caregiver"),
+      ~ na_if(., "")
+    )
+  )
+
+coal <- function(df, x, y, z) {
+  df %>% 
+    mutate(
+      !!sym(
+        paste("Caregiver", z)
+        ) := coalesce(
+          !!sym({{ x }}), 
+          !!sym({{ y }})
+      )
+    )
+  }
+
+for (i in seq(cg)){
+  
+  x <- cg1[i]
+  y <- cg2[i]
+  z <- cg[i]
+  df <- df %>% coal(x, y, z)
+  
+}
+
+df <- df %>% 
+  select(
+    - matches("^Caregiver #\\d")
+  )
+
+df <- df %>% 
+  filter(
+    !str_detect(progress, "Import")
+  ) %>% 
+  mutate(
+    across(
+      matches("(choice|hair|pregnant|bf)$"),
+      ~ as.factor(.x)
+    ),
+    date = ymd(as.Date(date))
+  ) %>% 
+  select(
+    matches("ID", ignore.case = FALSE),
+    everything()
+  ) 
+```
+
+
+
+# Split data into parents and children
+```{r}
+pdf <- df %>%
+  select(
+    !matches("^(bm|ht|ID)")
+  ) %>% 
+  rename_with(
+    ~ str_replace_all(.x, " |-|,|\\(|\\)|\\.", "_"),
+    starts_with("Caregiver")
+  ) %>% 
+  rename(
+    bm_choice = Caregiver_Weight___Selected_Choice,
+    bm_kg = Caregiver_Weight___Weight_in_kg__2_decimals__e_g___68_18____Text,
+    ht_choice = Caregiver_Height___reporting_preference,
+    ht_cm = Caregiver_Height___metric___cm,
+    ht_feet = Caregiver_Height___imperial___Feet,
+    ht_inches = Caregiver_Height___imperial___Inches,
+    ID = Caregiver_ID
+  ) %>% 
+  mutate(
+    ht_cm_converted = as.character(
+      30.48*as.numeric(ht_feet) 
+      + 2.54*as.numeric(ht_inches)
+      ),
+    ht_cm = coalesce(ht_cm, ht_cm_converted)
+  ) %>% 
+  select(- ht_cm_converted)
+
+cdf <- df %>% 
+  rename( 
+    SID = "Caregiver ID"
+    ) %>% 
+  filter(
+    !mi(ID) 
+  )
+
+df <- bind_rows(pdf, cdf)
+```
+# Checks
+
+## IDs 
+```{r}
+dups <- df %>% 
+  add_count(ID) %>% 
+  filter(n > 1) %>% 
+  select(ID, SID, n, progress)
+
+stopifnot(nrow(dups) == 0)
+```
+
+```{r}
+df <- df %>% 
+  filter(!mi(ID))
+```
+
+# Export
+
+```{r}
+
+vroom_write(
+  df,
+  paste0(cle_p, "ahha_ss.csv")
+)
+
+```
+
+
+
+
